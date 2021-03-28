@@ -1,0 +1,371 @@
+---
+title: "CLUS"
+output: pdf_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In order to work with the data I will be using the tidyverse package. It
+is well designed to manipulate and work with large sets of data. The
+tidy census package is designed to download census data and
+automatically convert it into a tidy format for manipulation and model
+building.
+
+```{r loading packages}
+pacman::p_load(tidyverse, tidycensus, writexl) #loading in and installing the packages
+```
+
+```{r Census function, message=FALSE, warning=FALSE, cache=FALSE}
+# The api key is necessary in order to get the tidy census package to work.
+# This url can be used to obtain a census key in about 3 min.
+# http://api.census.gov/data/key_signup.html
+census_api_key("4164f675c6d35b601029ed68e31ec5150dac968f")
+
+collect <- function(year, table, geometry = FALSE){
+  temp <- get_acs(geography = 'tract',
+          state = "PA",
+          year = year,
+          table = table,
+          cache_table = TRUE,
+          geometry = geometry,
+          output = "wide"
+          ) %>% 
+    rename(geoid = GEOID) %>% 
+    mutate(year = year)
+           
+  temp %>% 
+    mutate(county = str_extract(temp$NAME, "[[:alpha:]]*[[:blank:]](?=County)"),
+         tract = str_remove(temp$NAME, ",.*")) %>% 
+    select(geoid, year, county, tract, ends_with("E"), -NAME, -ends_with("PE")) 
+}
+```
+
+First I create a function that collects the data from the American
+Community Survey and changes it slightly. The default setting makes it
+so every entry has 2 rows, one for the estimate of the value and its
+margin of error, and one for the percentage of the estimate of the value
+and its margin of error. The transformation I apply removes this second
+row and just adds another 2 columns to the data.
+
+```{r Examples, message=FALSE, cache=TRUE}
+#An example of what the original function returns
+test <- get_acs(geography = 'tract',
+          state = "PA",
+          year = 2019,
+          table = "DP03",
+          cache_table = TRUE,
+          geometry = TRUE,
+          output = "wide"
+)
+test %>% 
+  select(GEOID, NAME, ends_with("E"), -ends_with("PE")) %>% view()
+#An example of what my modified version returns
+collect(2014, "DP05")
+```
+
+Here I am just running the function a bunch of times to collect all of
+the versions of the data that we want from all the different years and
+variables. If someone wants to optimize this code in the future it could
+probably be similar with a map function or a for loop.
+
+```{r Loading data, message=FALSE, warning=FALSE, cache=TRUE}
+#Social Characteristics
+SC_2019 <- collect(2019, "DP02")
+
+#Economic characteristics
+EC_2019 <- collect(2019, "DP03")
+
+#Housing Characteristics 
+HC_2019 <- collect(2019, "DP04")
+
+#Demographic and Housing Characteristics
+DC_2019 <- collect(2019, "DP05")
+```
+
+Here I am creating another function to load in some meta data about the
+American Community survey that I downloaded from the census. This
+enables us to get some labels about what the variables are in the tables
+that we created earlier. I use some regexes to make them more readable,
+however this makes some of the labels harder to understand as it removes
+some clarification. If you have the census table open in a browser it
+makes it much easier to understand with the combination, however more
+work could be done here to make it easier to use.
+
+```{r Creating Lables, message=FALSE, warning=FALSE}
+get_labels <- function(x) {
+  df <-  read_csv(x, col_names = FALSE, skip = 2) 
+  
+  df <- df %>% 
+    slice(seq(1, as.integer(count(df)), 4))
+  df <- df %>% 
+    mutate(variable_c = str_remove(df$X1,"E")) %>% 
+    separate(X2, into = c('f','a','b','c','d','e'), sep = "!!") %>% 
+    select(-X1,-f)
+}
+
+DP02_names <- get_labels("ACSDP5Y2019.DP02_metadata_2021-03-09T174642.csv")
+DP03_names <- get_labels("ACSDP5Y2019.DP03_metadata_2021-03-09T174642.csv")
+DP04_names <- get_labels("ACSDP5Y2019.DP04_metadata_2021-03-09T174642.csv")
+DP05_names <- get_labels("ACSDP5Y2019.DP05_metadata_2021-03-09T174642.csv")
+
+#This line combines the labels that we created from the earlier lines of code
+#into one large data set that contains all of the labels.
+
+census_labels <- bind_rows(DP02_names, DP03_names, DP04_names, DP05_names) %>% 
+  select(variable_c, a, b, c ,d, e)
+```
+
+Here we create the ACS dataset which combines all of the datasets
+created earlier into one large data set, and also creates a column that
+uses the labels created earlier to aid in readability of the dataset.
+
+```{r}
+municipal <- read_csv("PA_Tracts_2010_Intersect_Table.csv") 
+municipal2 <- municipal%>% 
+  select(GEOID10, NAMELSAD10, FID_PA_Mun) %>% 
+  rename(geoid = GEOID10, tract = NAMELSAD10, municipal = FID_PA_Mun) %>% 
+  mutate(geoid = as.character(geoid))
+
+rural <- readxl::read_excel(path = "rural.xlsx")
+
+ACS <- bind_cols(SC_2019, HC_2019, DC_2019, EC_2019) %>% 
+  rename(geoid = "geoid...1",
+         year = "year...2",
+         county = "county...3",
+         tract = "tract...4") %>% 
+  select(-contains("..."), -year) %>% 
+  mutate(county = str_trim(county)) %>% 
+  left_join(municipal2) %>%
+  left_join(rural) %>% 
+  select(geoid, municipal, county, urban, tract, everything()) %>% 
+  ungroup()
+
+
+```
+
+```{r}
+total_population_summary <- ACS %>%
+  group_by(urban) %>%
+  summarise(
+    total_pop = sum(DP05_0001E),
+    male_prop = sum(DP05_0002E) / sum(DP05_0001E),
+    female_prop = sum(DP05_0003E) / sum(DP05_0001E),
+    white_prop = sum(DP05_0037E) / sum(DP05_0001E),
+    black_prop = sum(DP05_0038E) / sum(DP05_0001E),
+    american_indian = sum(DP05_0039E) / sum(DP05_0001E),
+    asain_prop = sum(DP05_0044E) / sum(DP05_0001E),
+    pacific_prop = sum(DP05_0052E) / sum(DP05_0001E)
+  )
+
+age_distribution <- ACS %>%
+  group_by(urban) %>%
+  summarise(
+    total_pop = sum(DP05_0001E),
+    'years<_5' = sum(DP05_0005E)/ sum(DP05_0001E),
+    years_5_9 = sum(DP05_0006E)/ sum(DP05_0001E),
+    years_10_14 = sum(DP05_0007E)/ sum(DP05_0001E),
+    years_15_19 = sum(DP05_0008E)/ sum(DP05_0001E),
+    years_20_24 = sum(DP05_0009E)/ sum(DP05_0001E),
+    years_25_34 = sum(DP05_0010E)/ sum(DP05_0001E),
+    years_35_44 = sum(DP05_0011E)/ sum(DP05_0001E),
+    years_45_54 = sum(DP05_0012E)/ sum(DP05_0001E),
+    years_55_59 = sum(DP05_0013E)/ sum(DP05_0001E),
+    years_60_64 = sum(DP05_0014E)/ sum(DP05_0001E),
+    years_65_74 = sum(DP05_0015E)/ sum(DP05_0001E),
+    years_75_85 = sum(DP05_0016E)/ sum(DP05_0001E),
+    'years_>85' = sum(DP05_0017E)/ sum(DP05_0001E)
+  )
+
+home_income <- ACS %>%
+  group_by(urban) %>%
+  summarise(
+    total_households = sum(DP03_0051E),
+    '<$10,000' = sum(DP03_0052E) / sum(DP03_0051E),
+    '$10,000 to $14,999' = sum(DP03_0053E)/ sum(DP03_0051E),
+    "$15,000 to $24,999" = sum(DP03_0054E)/ sum(DP03_0051E),
+    '$25,000 to $34,999' = sum(DP03_0055E)/ sum(DP03_0051E),
+    "$35,000 to $49,999" = sum(DP03_0056E)/ sum(DP03_0051E),
+    "$50,000 to $74,999" = sum(DP03_0057E)/ sum(DP03_0051E),
+    "$75,000 to $99,999" = sum(DP03_0058E)/ sum(DP03_0051E),
+    "$100,000 to $149,999" = sum(DP03_0059E)/ sum(DP03_0051E),
+    "DP03_0060  $150,000 to $199,999" = sum(DP03_0060E)/ sum(DP03_0051E),
+    ">$200,000" = sum(DP03_0061E)/ sum(DP03_0051E)
+  )
+
+education_attainment <- ACS %>%
+  group_by(urban) %>%
+  summarise(
+    population_25_and_older = sum(DP02_0059E),
+    Less_than_9th_grade = sum(DP02_0060E) / sum(DP02_0059E),
+    "9th_to_12th_no_diploma" = sum(DP02_0061E)/ sum(DP02_0059E),
+    high_school_grad = sum(DP02_0062E)/ sum(DP02_0059E),
+    some_college = sum(DP02_0063E)/ sum(DP02_0059E),
+    associate = sum(DP02_0064E)/ sum(DP02_0059E),
+    bachelor = sum(DP02_0065E)/ sum(DP02_0059E),
+    "graduate/proffesional" = sum(DP02_0066E)/ sum(DP02_0059E),
+    high_school_or_higher = sum(DP02_0067E)/ sum(DP02_0059E),
+    bachelor_or_higher = sum(DP02_0068E)/ sum(DP02_0059E)
+  )
+
+ownership <- ACS %>%
+  group_by(urban) %>%
+  summarise(
+    Occupied_housing_units = sum(DP04_0045E),
+    Owner_occupied = sum(DP04_0046E) / sum(DP04_0045E),
+    Renter_occupied = sum(DP04_0047E)/ sum(DP04_0045E),
+    Average_household_size_of_owner_occupied_unit = median(na.omit(DP04_0048E)),
+    Average_household_size_of_renter_occupied_unit = median(na.omit(DP04_0049E))
+  )
+
+housing_characteristics <- ACS %>%
+  group_by(urban) %>%
+  summarise(
+    total_housholds = sum(DP02_0151E),
+    with_computer = sum(DP02_0152E)/sum(DP02_0151E),
+    with_internet = sum(DP02_0153E)/sum(DP02_0151E),
+    occupied_housing_units = sum(DP04_0062E),
+    utility_gas = sum(DP04_0063E)/sum(DP04_0062E),
+    bottled_tanked_or_LP_gas = sum(DP04_0064E)/sum(DP04_0062E),
+    electricity = sum(DP04_0065E)/sum(DP04_0062E),
+    fuel_oil = sum(DP04_0066E)/sum(DP04_0062E),
+    "coal/coke" = sum(DP04_0067E)/sum(DP04_0062E),
+    wood = sum(DP04_0068E)/sum(DP04_0062E),
+    solar = sum(DP04_0069E)/sum(DP04_0062E),
+    other_fuel = sum(DP04_0070E)/sum(DP04_0062E),
+    no_fuel = sum(DP04_0071E)/sum(DP04_0062E),
+    lacking_plumbing = sum(DP04_0073E)/sum(DP04_0062E),
+    lacking_kitchen = sum(DP04_0074E)/sum(DP04_0062E),
+    lacking_telephone = sum(DP04_0075E)/sum(DP04_0062E),
+    "OPR<=1" = sum(DP04_0077E)/sum(DP04_0062E),
+    "OPR_1.01-1.50" = sum(DP04_0078E)/sum(DP04_0062E),
+    "OPR>=1.51" = sum(DP04_0079E)/sum(DP04_0062E)
+  )
+
+housing_costs <- ACS %>%
+  group_by(urban) %>%
+  summarise(
+    housing_units_with_mortgage = sum(DP04_0093E),
+    housing_units_without_mortgage = sum(DP04_0102E),
+    'housing_units_with_mortgage(excluding_SMOCAPI_NA)' = sum(DP04_0110E),
+    'housing_units_without_mortgage(excluding_SMOCAPI_NA)' = sum(DP04_0117E),
+    "SMOC_less_than_$500_with_mortgage" = sum(DP04_0094E)/sum(DP04_0093E),
+    "SMOC_$500_to_$999_with_mortgage" = sum(DP04_0095E)/sum(DP04_0093E),
+    'SMOC_$1,000_to_$1,499_with_mortgage' = sum(DP04_0096E)/sum(DP04_0093E),
+    'SMOC_$1,500_to_$1,999_with_mortgage' = sum(DP04_0097E)/sum(DP04_0093E),
+    'SMOC_$2,000_to_$2,499_with_mortgage '= sum(DP04_0098E)/sum(DP04_0093E),
+    'SMOC_$2,500_to_$2,999_with_mortgage' = sum(DP04_0099E)/sum(DP04_0093E),
+    'SMOC_$3,000_or_more_with_mortgage' = sum(DP04_0100E)/sum(DP04_0093E),
+    SMOC_median_with_mortgage = median(na.omit(DP04_0101E)),
+    "SMOCLess_than_$250_without_mortgage" = sum(DP04_0103E)/sum(DP04_0102E),
+    "SMOC$250_to_$399_without_mortgage" = sum(DP04_0104E)/sum(DP04_0102E),
+    'SMOC$400_to_$599_without_mortgage' = sum(DP04_0105E)/sum(DP04_0102E),
+    'SMOC$600_to_$799_without_mortgage' = sum(DP04_0106E)/sum(DP04_0102E),
+    'SMOC$800_to_$999_without_mortgage '= sum(DP04_0107E)/sum(DP04_0102E),
+    'SMOC$1,000_or_more_without_mortgage' = sum(DP04_0108E)/sum(DP04_0102E),
+    SMOC_median_without_mortgage = median(na.omit(DP04_0109E)),
+    "SMOCAPI_with_mortgage_less_than_20.0" = sum(DP04_0111E)/sum(DP04_0110E),
+    "SMOCAPI_with_mortgage_20.0_to_24.9" = sum(DP04_0112E)/sum(DP04_0110E),
+    "SMOCAPI_with_mortgage_25.0_to_29.9" = sum(DP04_0113E)/sum(DP04_0110E),
+    "SMOCAPI_with_mortgage_30.0_to_34.9" = sum(DP04_0114E)/sum(DP04_0110E),
+    "SMOCAPI_with_mortgage_35.0_or_more" = sum(DP04_0115E)/sum(DP04_0110E),
+    "SMOCAPI_with_mortgage_not_computed" = sum(DP04_0116E)/sum(DP04_0110E),
+    "SMOCAPI_without_mortgage_less_than_10.0" = sum(DP04_0118E)/sum(DP04_0117E),
+    "SMOCAPI_without_mortgage_10.0_to_14.9" = sum(DP04_0119E)/sum(DP04_0117E),
+    "SMOCAPI_without_mortgage_15.0_to_19.9" = sum(DP04_0120E)/sum(DP04_0117E),
+    "SMOCAPI_without_mortgage_20.0_to_24.9" = sum(DP04_0121E)/sum(DP04_0117E),
+    "SMOCAPI_without_mortgage_25.0_to_29.9" = sum(DP04_0122E)/sum(DP04_0117E),
+    "SMOCAPI_without_mortgage_30.0_to_34.9" = sum(DP04_0123E)/sum(DP04_0117E),
+    "SMOCAPI_without_mortgage_35.0_or_more" = sum(DP04_0124E)/sum(DP04_0117E),
+    "SMOCAPI_without_mortgage_not_computed" = sum(DP04_0125E)/sum(DP04_0117E),
+  )
+
+housing_value <- ACS %>%
+  group_by(urban) %>%
+  summarise(DP04_0089E)
+
+```
+
+```{r creating an excel worksheet, eval=FALSE, include=FALSE}
+
+
+write_xlsx(
+  x = list(ACS = ACS, census_labels = census_labels),
+  path = "ACSv2.xlsx",
+  col_names = TRUE
+)
+
+write_xlsx(
+  x = list(
+    total_population_summary = total_population_summary,
+    age_distribution = age_distribution,
+    home_income = home_income,
+    education_attainment = education_attainment,
+    ownership = ownership,
+    housing_characteristics = housing_characteristics,
+    housing_costs = housing_costs#,
+    #housing_value = housing_value
+  ),
+  path = "ACS_summery.xlsx",
+  col_names = TRUE
+)
+```
+
+*Below here is just of copy past of the variable that were asked for in
+the document. This is just to aid my work flow*
+
+```{r include=FALSE, eval=FALSE}
+
+mutate(variable_c = str_remove(df$X1,"E"),
+           variable_l = str_remove(df$X2, "Estimate")) %>% 
+    select(variable_c, variable_l) 
+  df %>% 
+    mutate(variable_l = str_replace_all(df$variable_l, "!!", "\\\n"))
+  
+  
+ACS_long <- bind_rows(SC_2019, HC_2019, DC_2019, EC_2019) %>% 
+  select(-year, -moe) %>% 
+  filter(!str_detect(variable, "P$")) %>% 
+  rename(variable_c = variable)
+  
+
+test <- left_join(ACS_long, census_labels, by = "variable_c")
+  
+test1 <- test %>% pivot_wider(id_cols = c(geoid, county, tract), names_from = c(variable_c, variable_l), values_from = estimate) 
+
+
+
+  
+```
+
+summery stats a. total population estimates for each municipality and
+sex and race ratio b. age distribution c. family income distribution d.
+educational attainment distribution e. homeownership rate vs renter rate
+f. distribution of housing characteristics (percentages of lacking
+complete plumbing, lacking complete kitchen facilities, no telephone
+service, without a computer, without internet subscription, types of
+heating fuels used, and average number of occupants per room) g. medians
+of monthly housing cost and monthly housing costs as a percentage of
+household income (run this for homeowners only) h. median property
+value, ratio of value to household income and real estate taxes (for
+homeowners only)
+
+Selected housing characteristics: housing occupancy (occupied housing
+units, vacant housing units, homeowner vacancy rate, rental vacancy
+rate); Units in structure; year structure built; \# of rooms; \#of
+bedrooms; housing tenure (owner vs. renter); year householder moved in;
+house heating fuel; plumbing, kitchen, and telephone service; occupants
+per room; mortgage status;
+
+Race and ethnicity (when downloading the table, keep estimate and
+percent) Population and people (age and sex) Selected social
+characteristics (household by type, marital status, educational
+attainment, disability status, U.S. citizenship status and year of
+entry, computers and internet use) Financial characteristics (household
+income, monthly housing costs, monthly housing costs as a percentage of
+household income, mortgage status, ratio of value to household income,
+real estate taxes) idea storage
