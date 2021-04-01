@@ -17,7 +17,7 @@ automatically convert it into a tidy format for manipulation and model
 building.
 
 ```{r loading packages}
-pacman::p_load(tidyverse, tidycensus, writexl) #loading in and installing the packages
+pacman::p_load(tidyverse, tidycensus, writexl, janitor) #loading in and installing the packages
 ```
 
 ```{r Census function, message=FALSE, warning=FALSE, cache=FALSE}
@@ -33,7 +33,7 @@ collect <- function(year, table, geometry = FALSE){
           table = table,
           cache_table = TRUE,
           geometry = geometry,
-          output = "wide"
+          output = "tidy"
           ) %>% 
     rename(geoid = GEOID) %>% 
     mutate(year = year)
@@ -45,28 +45,6 @@ collect <- function(year, table, geometry = FALSE){
 }
 ```
 
-First I create a function that collects the data from the American
-Community Survey and changes it slightly. The default setting makes it
-so every entry has 2 rows, one for the estimate of the value and its
-margin of error, and one for the percentage of the estimate of the value
-and its margin of error. The transformation I apply removes this second
-row and just adds another 2 columns to the data.
-
-```{r Examples, message=FALSE, cache=TRUE}
-#An example of what the original function returns
-test <- get_acs(geography = 'tract',
-          state = "PA",
-          year = 2019,
-          table = "DP03",
-          cache_table = TRUE,
-          geometry = TRUE,
-          output = "wide"
-)
-test %>% 
-  select(GEOID, NAME, ends_with("E"), -ends_with("PE")) %>% view()
-#An example of what my modified version returns
-collect(2014, "DP05")
-```
 
 Here I am just running the function a bunch of times to collect all of
 the versions of the data that we want from all the different years and
@@ -118,6 +96,55 @@ DP05_names <- get_labels("ACSDP5Y2019.DP05_metadata_2021-03-09T174642.csv")
 
 census_labels <- bind_rows(DP02_names, DP03_names, DP04_names, DP05_names) %>% 
   select(variable_c, a, b, c ,d, e)
+variable_labels <- census_labels %>% 
+  unite(variable_l, c(b,c,d,e), na.rm = TRUE) %>% 
+  select(-a) %>% 
+  mutate(variable_l = str_replace(variable_l, "Total households_", "TH_"),
+         variable_l = str_replace(variable_l, "no spouse/partner present", "no_spouse"),
+         variable_l = str_replace(variable_l, "Married-couple family", "married"),
+         variable_l = str_replace(variable_l, "With own children of the householder under 18 years", "with_kids"),
+         variable_l = str_replace(variable_l, "Cohabiting couple household", "Cohabiting"),
+         variable_l = str_replace(variable_l, "no_spouse_Householder living alone", "alone"),
+         variable_l = str_replace(variable_l, "65 years and over", "older_than_65"),
+         variable_l = str_replace(variable_l, "under 18 years", "kids"),
+         variable_l = str_replace(variable_l, "Households with one or more people", "households_with"),
+         variable_l = str_replace(variable_l, "15 years and over", "older_than_15"),
+        variable_l = str_replace(variable_l, "Population 3 years and over enrolled in school", "older_than_3_in_school"),
+        variable_l = str_replace(variable_l, ", preschool", ""),
+        variable_l = str_replace(variable_l, "Population 25 years and over", "pop_older_than_25"),
+        variable_l = str_replace(variable_l, " (includes equivalency)", ""),
+        variable_l = str_replace(variable_l, "Population 16 years and over", "pop_older_than_16"),
+        variable_l = str_replace(variable_l, "labor force", "lf"),
+        variable_l = str_replace(variable_l, "Married-couple family_", "married"),
+        variable_l = str_replace(variable_l, "16 years and over", "older_than_16"),
+        variable_l = str_replace(variable_l, "Own children of the householder under 6 years
+", "own_children_younger_than_6_yr"),
+        variable_l = str_replace(variable_l, "All parents in family in labor force
+", "all_parents_in_lf"),
+        variable_l = str_replace(variable_l, "Own children of the householder 6 to 17 years", "own_children_6_17"),
+        variable_l = str_replace(variable_l, "Car, truck, or van -- ", ""),
+variable_l = str_replace(variable_l, "Total population", "total_pop"),
+variable_l = str_replace(variable_l, "Total housing units_", "total_hu_"),
+variable_l = str_replace(variable_l, "Housing units with a mortgage_", "SMOC_with_mortgage_"),
+variable_l = str_replace(variable_l, "Housing units without a mortgage_", "SMOC_without_mortgage_"),
+variable_l = str_replace(variable_l, "Housing units with a mortgage ", "SMOCAPI_with_mortgage_"),
+variable_l = str_replace(variable_l, "Housing unit without a mortgage ", "SMOCAPI_without_mortgage"),
+variable_l = str_remove(variable_l, "\\(excluding units where SMOCAPI cannot be computed\\)"),
+variable_l = str_replace(variable_l, "Occupied units paying rent_", "gross_rent_"),
+variable_l = str_replace(variable_l, "Occupied units paying rent ", "GRAPI"),
+variable_l = str_remove(variable_l, "\\(excluding units where GRAPI cannot be computed\\)"),
+variable_l = str_replace(variable_l, "Occupied housing units_", "occupied_hu_"),
+variable_l = str_replace(variable_l, "18", "tp_"),
+variable_l = str_replace_all(variable_l, "\\.", "q"),
+variable_l = str_remove_all(variable_l, ",")
+)
+
+variable_labels$variable_l[514] <- "total_housing_units"
+variable_labels$variable_l <- variable_labels$variable_l %>% snakecase::to_any_case()
+variable_labels$variable_l <- variable_labels$variable_l %>% str_replace_all( "_q_", ".")
+
+variable_labels$duplicate <- variable_labels$variable_l %>% duplicated()
+
 ```
 
 Here we create the ACS dataset which combines all of the datasets
@@ -142,82 +169,83 @@ ACS <- bind_cols(SC_2019, HC_2019, DC_2019, EC_2019) %>%
   mutate(county = str_trim(county)) %>% 
   left_join(municipal2) %>%
   left_join(rural) %>% 
-  select(geoid, municipal, county, urban, tract, everything()) %>% 
-  ungroup()
+  select(geoid, municipal, county, urban, tract, everything())
 
 
 ```
 
 ```{r}
+specify_decimal <- function(x, k) as.numeric(trimws(format(round(x, k), nsmall=k)))
+
 total_population_summary <- ACS %>%
   group_by(urban) %>%
   summarise(
     total_pop = sum(DP05_0001E),
-    male_prop = sum(DP05_0002E) / sum(DP05_0001E),
-    female_prop = sum(DP05_0003E) / sum(DP05_0001E),
-    white_prop = sum(DP05_0037E) / sum(DP05_0001E),
-    black_prop = sum(DP05_0038E) / sum(DP05_0001E),
-    american_indian = sum(DP05_0039E) / sum(DP05_0001E),
-    asain_prop = sum(DP05_0044E) / sum(DP05_0001E),
-    pacific_prop = sum(DP05_0052E) / sum(DP05_0001E)
-  )
+    male_prop = specify_decimal(sum(DP05_0002E) / sum(DP05_0001E), 3),
+    female_prop = specify_decimal(sum(DP05_0003E) / sum(DP05_0001E), 3),
+    white_prop = specify_decimal(sum(DP05_0037E) / sum(DP05_0001E), 3),
+    black_prop = specify_decimal(sum(DP05_0038E) / sum(DP05_0001E), 3),
+    american_indian = specify_decimal(sum(DP05_0039E) / sum(DP05_0001E), 3),
+    asain_prop = specify_decimal(sum(DP05_0044E) / sum(DP05_0001E), 3),
+    pacific_prop = specify_decimal(sum(DP05_0052E) / sum(DP05_0001E), 3)
+  ) %>% pivot_longer(c(-urban,everything()), names_to = "variable", values_to = "estimate")
 
 age_distribution <- ACS %>%
   group_by(urban) %>%
   summarise(
     total_pop = sum(DP05_0001E),
-    'years<_5' = sum(DP05_0005E)/ sum(DP05_0001E),
-    years_5_9 = sum(DP05_0006E)/ sum(DP05_0001E),
-    years_10_14 = sum(DP05_0007E)/ sum(DP05_0001E),
-    years_15_19 = sum(DP05_0008E)/ sum(DP05_0001E),
-    years_20_24 = sum(DP05_0009E)/ sum(DP05_0001E),
-    years_25_34 = sum(DP05_0010E)/ sum(DP05_0001E),
-    years_35_44 = sum(DP05_0011E)/ sum(DP05_0001E),
-    years_45_54 = sum(DP05_0012E)/ sum(DP05_0001E),
-    years_55_59 = sum(DP05_0013E)/ sum(DP05_0001E),
-    years_60_64 = sum(DP05_0014E)/ sum(DP05_0001E),
-    years_65_74 = sum(DP05_0015E)/ sum(DP05_0001E),
-    years_75_85 = sum(DP05_0016E)/ sum(DP05_0001E),
-    'years_>85' = sum(DP05_0017E)/ sum(DP05_0001E)
+    'years<_5' = specify_decimal(sum(DP05_0005E)/ sum(DP05_0001E), 3),
+    years_5_9 = specify_decimal(sum(DP05_0006E)/ sum(DP05_0001E), 3),
+    years_10_14 = specify_decimal(sum(DP05_0007E)/ sum(DP05_0001E), 3),
+    years_15_19 = specify_decimal(sum(DP05_0008E)/ sum(DP05_0001E), 3),
+    years_20_24 = specify_decimal(sum(DP05_0009E)/ sum(DP05_0001E), 3),
+    years_25_34 = specify_decimal(sum(DP05_0010E)/ sum(DP05_0001E), 3),
+    years_35_44 = specify_decimal(sum(DP05_0011E)/ sum(DP05_0001E), 3),
+    years_45_54 = specify_decimal(sum(DP05_0012E)/ sum(DP05_0001E), 3),
+    years_55_59 = specify_decimal(sum(DP05_0013E)/ sum(DP05_0001E), 3),
+    years_60_64 = specify_decimal(sum(DP05_0014E)/ sum(DP05_0001E), 3),
+    years_65_74 = specify_decimal(sum(DP05_0015E)/ sum(DP05_0001E), 3),
+    years_75_85 = specify_decimal(sum(DP05_0016E)/ sum(DP05_0001E), 3),
+    'years_>85' = specify_decimal(sum(DP05_0017E)/ sum(DP05_0001E), 3)
   )
 
 home_income <- ACS %>%
   group_by(urban) %>%
   summarise(
     total_households = sum(DP03_0051E),
-    '<$10,000' = sum(DP03_0052E) / sum(DP03_0051E),
-    '$10,000 to $14,999' = sum(DP03_0053E)/ sum(DP03_0051E),
-    "$15,000 to $24,999" = sum(DP03_0054E)/ sum(DP03_0051E),
-    '$25,000 to $34,999' = sum(DP03_0055E)/ sum(DP03_0051E),
-    "$35,000 to $49,999" = sum(DP03_0056E)/ sum(DP03_0051E),
-    "$50,000 to $74,999" = sum(DP03_0057E)/ sum(DP03_0051E),
-    "$75,000 to $99,999" = sum(DP03_0058E)/ sum(DP03_0051E),
-    "$100,000 to $149,999" = sum(DP03_0059E)/ sum(DP03_0051E),
-    "DP03_0060  $150,000 to $199,999" = sum(DP03_0060E)/ sum(DP03_0051E),
-    ">$200,000" = sum(DP03_0061E)/ sum(DP03_0051E)
+    '<$10,000' = specify_decimal(sum(DP03_0052E) / sum(DP03_0051E), 3),
+    '$10,000 to $14,999' = specify_decimal(sum(DP03_0053E)/ sum(DP03_0051E), 3),
+    "$15,000 to $24,999" = specify_decimal(sum(DP03_0054E)/ sum(DP03_0051E), 3),
+    '$25,000 to $34,999' = specify_decimal(sum(DP03_0055E)/ sum(DP03_0051E), 3),
+    "$35,000 to $49,999" = specify_decimal(sum(DP03_0056E)/ sum(DP03_0051E), 3),
+    "$50,000 to $74,999" = specify_decimal(sum(DP03_0057E)/ sum(DP03_0051E), 3),
+    "$75,000 to $99,999" = specify_decimal(sum(DP03_0058E)/ sum(DP03_0051E), 3),
+    "$100,000 to $149,999" = specify_decimal(sum(DP03_0059E)/ sum(DP03_0051E), 3),
+    "DP03_0060  $150,000 to $199,999" = specify_decimal(sum(DP03_0060E)/ sum(DP03_0051E), 3),
+    ">$200,000" = specify_decimal(sum(DP03_0061E)/ sum(DP03_0051E), 3)
   )
 
 education_attainment <- ACS %>%
   group_by(urban) %>%
   summarise(
     population_25_and_older = sum(DP02_0059E),
-    Less_than_9th_grade = sum(DP02_0060E) / sum(DP02_0059E),
-    "9th_to_12th_no_diploma" = sum(DP02_0061E)/ sum(DP02_0059E),
-    high_school_grad = sum(DP02_0062E)/ sum(DP02_0059E),
-    some_college = sum(DP02_0063E)/ sum(DP02_0059E),
-    associate = sum(DP02_0064E)/ sum(DP02_0059E),
-    bachelor = sum(DP02_0065E)/ sum(DP02_0059E),
-    "graduate/proffesional" = sum(DP02_0066E)/ sum(DP02_0059E),
-    high_school_or_higher = sum(DP02_0067E)/ sum(DP02_0059E),
-    bachelor_or_higher = sum(DP02_0068E)/ sum(DP02_0059E)
+    Less_than_9th_grade = specify_decimal(sum(DP02_0060E) / sum(DP02_0059E), 3),
+    "9th_to_12th_no_diploma" = specify_decimal(sum(DP02_0061E)/ sum(DP02_0059E), 3),
+    high_school_grad = specify_decimal(sum(DP02_0062E)/ sum(DP02_0059E), 3),
+    some_college = specify_decimal(sum(DP02_0063E)/ sum(DP02_0059E), 3),
+    associate = specify_decimal(sum(DP02_0064E)/ sum(DP02_0059E), 3),
+    bachelor = specify_decimal(sum(DP02_0065E)/ sum(DP02_0059E), 3),
+    "graduate/proffesional" = specify_decimal(sum(DP02_0066E)/ sum(DP02_0059E), 3),
+    high_school_or_higher = specify_decimal(sum(DP02_0067E)/ sum(DP02_0059E), 3),
+    bachelor_or_higher = specify_decimal(sum(DP02_0068E)/ sum(DP02_0059E), 3)
   )
 
 ownership <- ACS %>%
   group_by(urban) %>%
   summarise(
     Occupied_housing_units = sum(DP04_0045E),
-    Owner_occupied = sum(DP04_0046E) / sum(DP04_0045E),
-    Renter_occupied = sum(DP04_0047E)/ sum(DP04_0045E),
+    Owner_occupied = specify_decimal(sum(DP04_0046E) / sum(DP04_0045E), 3),
+    Renter_occupied = specify_decimal(sum(DP04_0047E)/ sum(DP04_0045E), 3),
     Average_household_size_of_owner_occupied_unit = median(na.omit(DP04_0048E)),
     Average_household_size_of_renter_occupied_unit = median(na.omit(DP04_0049E))
   )
@@ -226,24 +254,24 @@ housing_characteristics <- ACS %>%
   group_by(urban) %>%
   summarise(
     total_housholds = sum(DP02_0151E),
-    with_computer = sum(DP02_0152E)/sum(DP02_0151E),
-    with_internet = sum(DP02_0153E)/sum(DP02_0151E),
+    with_computer = specify_decimal(sum(DP02_0152E)/sum(DP02_0151E), 3),
+    with_internet = specify_decimal(sum(DP02_0153E)/sum(DP02_0151E), 3),
     occupied_housing_units = sum(DP04_0062E),
-    utility_gas = sum(DP04_0063E)/sum(DP04_0062E),
-    bottled_tanked_or_LP_gas = sum(DP04_0064E)/sum(DP04_0062E),
-    electricity = sum(DP04_0065E)/sum(DP04_0062E),
-    fuel_oil = sum(DP04_0066E)/sum(DP04_0062E),
-    "coal/coke" = sum(DP04_0067E)/sum(DP04_0062E),
-    wood = sum(DP04_0068E)/sum(DP04_0062E),
-    solar = sum(DP04_0069E)/sum(DP04_0062E),
-    other_fuel = sum(DP04_0070E)/sum(DP04_0062E),
-    no_fuel = sum(DP04_0071E)/sum(DP04_0062E),
-    lacking_plumbing = sum(DP04_0073E)/sum(DP04_0062E),
-    lacking_kitchen = sum(DP04_0074E)/sum(DP04_0062E),
-    lacking_telephone = sum(DP04_0075E)/sum(DP04_0062E),
-    "OPR<=1" = sum(DP04_0077E)/sum(DP04_0062E),
-    "OPR_1.01-1.50" = sum(DP04_0078E)/sum(DP04_0062E),
-    "OPR>=1.51" = sum(DP04_0079E)/sum(DP04_0062E)
+    utility_gas = specify_decimal(sum(DP04_0063E)/sum(DP04_0062E), 3),
+    bottled_tanked_or_LP_gas = specify_decimal(sum(DP04_0064E)/sum(DP04_0062E), 3),
+    electricity = specify_decimal(sum(DP04_0065E)/sum(DP04_0062E), 3),
+    fuel_oil = specify_decimal(sum(DP04_0066E)/sum(DP04_0062E), 3),
+    "coal/coke" = specify_decimal(sum(DP04_0067E)/sum(DP04_0062E), 3),
+    wood = specify_decimal(sum(DP04_0068E)/sum(DP04_0062E), 3),
+    solar = specify_decimal(sum(DP04_0069E)/sum(DP04_0062E), 3),
+    other_fuel = specify_decimal(sum(DP04_0070E)/sum(DP04_0062E), 3),
+    no_fuel = specify_decimal(sum(DP04_0071E)/sum(DP04_0062E), 3),
+    lacking_plumbing = specify_decimal(sum(DP04_0073E)/sum(DP04_0062E), 3),
+    lacking_kitchen = specify_decimal(sum(DP04_0074E)/sum(DP04_0062E), 3),
+    lacking_telephone = specify_decimal(sum(DP04_0075E)/sum(DP04_0062E), 3),
+    "OPR<=1" = specify_decimal(sum(DP04_0077E)/sum(DP04_0062E), 3),
+    "OPR_1.01-1.50" = specify_decimal(sum(DP04_0078E)/sum(DP04_0062E), 3),
+    "OPR>=1.51" = specify_decimal(sum(DP04_0079E)/sum(DP04_0062E), 3)
   )
 
 housing_costs <- ACS %>%
@@ -253,35 +281,35 @@ housing_costs <- ACS %>%
     housing_units_without_mortgage = sum(DP04_0102E),
     'housing_units_with_mortgage(excluding_SMOCAPI_NA)' = sum(DP04_0110E),
     'housing_units_without_mortgage(excluding_SMOCAPI_NA)' = sum(DP04_0117E),
-    "SMOC_less_than_$500_with_mortgage" = sum(DP04_0094E)/sum(DP04_0093E),
-    "SMOC_$500_to_$999_with_mortgage" = sum(DP04_0095E)/sum(DP04_0093E),
-    'SMOC_$1,000_to_$1,499_with_mortgage' = sum(DP04_0096E)/sum(DP04_0093E),
-    'SMOC_$1,500_to_$1,999_with_mortgage' = sum(DP04_0097E)/sum(DP04_0093E),
-    'SMOC_$2,000_to_$2,499_with_mortgage '= sum(DP04_0098E)/sum(DP04_0093E),
-    'SMOC_$2,500_to_$2,999_with_mortgage' = sum(DP04_0099E)/sum(DP04_0093E),
-    'SMOC_$3,000_or_more_with_mortgage' = sum(DP04_0100E)/sum(DP04_0093E),
+    "SMOC_less_than_$500_with_mortgage" = specify_decimal(sum(DP04_0094E)/sum(DP04_0093E), 3),
+    "SMOC_$500_to_$999_with_mortgage" = specify_decimal(sum(DP04_0095E)/sum(DP04_0093E), 3),
+    'SMOC_$1,000_to_$1,499_with_mortgage' = specify_decimal(sum(DP04_0096E)/sum(DP04_0093E), 3),
+    'SMOC_$1,500_to_$1,999_with_mortgage' = specify_decimal(sum(DP04_0097E)/sum(DP04_0093E), 3),
+    'SMOC_$2,000_to_$2,499_with_mortgage '= specify_decimal(sum(DP04_0098E)/sum(DP04_0093E), 3),
+    'SMOC_$2,500_to_$2,999_with_mortgage' = specify_decimal(sum(DP04_0099E)/sum(DP04_0093E), 3),
+    'SMOC_$3,000_or_more_with_mortgage' = specify_decimal(sum(DP04_0100E)/sum(DP04_0093E), 3),
     SMOC_median_with_mortgage = median(na.omit(DP04_0101E)),
-    "SMOCLess_than_$250_without_mortgage" = sum(DP04_0103E)/sum(DP04_0102E),
-    "SMOC$250_to_$399_without_mortgage" = sum(DP04_0104E)/sum(DP04_0102E),
-    'SMOC$400_to_$599_without_mortgage' = sum(DP04_0105E)/sum(DP04_0102E),
-    'SMOC$600_to_$799_without_mortgage' = sum(DP04_0106E)/sum(DP04_0102E),
-    'SMOC$800_to_$999_without_mortgage '= sum(DP04_0107E)/sum(DP04_0102E),
-    'SMOC$1,000_or_more_without_mortgage' = sum(DP04_0108E)/sum(DP04_0102E),
+    "SMOCLess_than_$250_without_mortgage" = specify_decimal(sum(DP04_0103E)/sum(DP04_0102E), 3),
+    "SMOC$250_to_$399_without_mortgage" = specify_decimal(sum(DP04_0104E)/sum(DP04_0102E), 3),
+    'SMOC$400_to_$599_without_mortgage' = specify_decimal(sum(DP04_0105E)/sum(DP04_0102E), 3),
+    'SMOC$600_to_$799_without_mortgage' = specify_decimal(sum(DP04_0106E)/sum(DP04_0102E), 3),
+    'SMOC$800_to_$999_without_mortgage '= specify_decimal(sum(DP04_0107E)/sum(DP04_0102E), 3),
+    'SMOC$1,000_or_more_without_mortgage' = specify_decimal(sum(DP04_0108E)/sum(DP04_0102E), 3),
     SMOC_median_without_mortgage = median(na.omit(DP04_0109E)),
-    "SMOCAPI_with_mortgage_less_than_20.0" = sum(DP04_0111E)/sum(DP04_0110E),
-    "SMOCAPI_with_mortgage_20.0_to_24.9" = sum(DP04_0112E)/sum(DP04_0110E),
-    "SMOCAPI_with_mortgage_25.0_to_29.9" = sum(DP04_0113E)/sum(DP04_0110E),
-    "SMOCAPI_with_mortgage_30.0_to_34.9" = sum(DP04_0114E)/sum(DP04_0110E),
-    "SMOCAPI_with_mortgage_35.0_or_more" = sum(DP04_0115E)/sum(DP04_0110E),
-    "SMOCAPI_with_mortgage_not_computed" = sum(DP04_0116E)/sum(DP04_0110E),
-    "SMOCAPI_without_mortgage_less_than_10.0" = sum(DP04_0118E)/sum(DP04_0117E),
-    "SMOCAPI_without_mortgage_10.0_to_14.9" = sum(DP04_0119E)/sum(DP04_0117E),
-    "SMOCAPI_without_mortgage_15.0_to_19.9" = sum(DP04_0120E)/sum(DP04_0117E),
-    "SMOCAPI_without_mortgage_20.0_to_24.9" = sum(DP04_0121E)/sum(DP04_0117E),
-    "SMOCAPI_without_mortgage_25.0_to_29.9" = sum(DP04_0122E)/sum(DP04_0117E),
-    "SMOCAPI_without_mortgage_30.0_to_34.9" = sum(DP04_0123E)/sum(DP04_0117E),
-    "SMOCAPI_without_mortgage_35.0_or_more" = sum(DP04_0124E)/sum(DP04_0117E),
-    "SMOCAPI_without_mortgage_not_computed" = sum(DP04_0125E)/sum(DP04_0117E),
+    "SMOCAPI_with_mortgage_less_than_20.0" = specify_decimal(sum(DP04_0111E)/sum(DP04_0110E), 3),
+    "SMOCAPI_with_mortgage_20.0_to_24.9" = specify_decimal(sum(DP04_0112E)/sum(DP04_0110E), 3),
+    "SMOCAPI_with_mortgage_25.0_to_29.9" = specify_decimal(sum(DP04_0113E)/sum(DP04_0110E), 3),
+    "SMOCAPI_with_mortgage_30.0_to_34.9" = specify_decimal(sum(DP04_0114E)/sum(DP04_0110E), 3),
+    "SMOCAPI_with_mortgage_35.0_or_more" = specify_decimal(sum(DP04_0115E)/sum(DP04_0110E), 3),
+    "SMOCAPI_with_mortgage_not_computed" = specify_decimal(sum(DP04_0116E)/sum(DP04_0110E), 3),
+    "SMOCAPI_without_mortgage_less_than_10.0" = specify_decimal(sum(DP04_0118E)/sum(DP04_0117E), 3),
+    "SMOCAPI_without_mortgage_10.0_to_14.9" = specify_decimal(sum(DP04_0119E)/sum(DP04_0117E), 3),
+    "SMOCAPI_without_mortgage_15.0_to_19.9" = specify_decimal(sum(DP04_0120E)/sum(DP04_0117E), 3),
+    "SMOCAPI_without_mortgage_20.0_to_24.9" = specify_decimal(sum(DP04_0121E)/sum(DP04_0117E), 3),
+    "SMOCAPI_without_mortgage_25.0_to_29.9" = specify_decimal(sum(DP04_0122E)/sum(DP04_0117E), 3),
+    "SMOCAPI_without_mortgage_30.0_to_34.9" = specify_decimal(sum(DP04_0123E)/sum(DP04_0117E), 3),
+    "SMOCAPI_without_mortgage_35.0_or_more" = specify_decimal(sum(DP04_0124E)/sum(DP04_0117E), 3),
+    "SMOCAPI_without_mortgage_not_computed" = specify_decimal(sum(DP04_0125E)/sum(DP04_0117E), 3),
   )
 
 housing_value <- ACS %>%
@@ -294,8 +322,8 @@ housing_value <- ACS %>%
 
 
 write_xlsx(
-  x = list(ACS = ACS, census_labels = census_labels),
-  path = "ACSv2.xlsx",
+  x = list(ACS = test1, census_labels = census_labels),
+  path = "ACSv3.xlsx",
   col_names = TRUE
 )
 
@@ -320,23 +348,22 @@ the document. This is just to aid my work flow*
 
 ```{r include=FALSE, eval=FALSE}
 
-mutate(variable_c = str_remove(df$X1,"E"),
-           variable_l = str_remove(df$X2, "Estimate")) %>% 
-    select(variable_c, variable_l) 
-  df %>% 
-    mutate(variable_l = str_replace_all(df$variable_l, "!!", "\\\n"))
-  
-  
-ACS_long <- bind_rows(SC_2019, HC_2019, DC_2019, EC_2019) %>% 
+ACS_long <- bind_rows(SC_2019, EC_2019, HC_2019, DC_2019) %>% 
   select(-year, -moe) %>% 
   filter(!str_detect(variable, "P$")) %>% 
   rename(variable_c = variable)
   
+test <- ACS_long %>% 
+  left_join(variable_labels, by = "variable_c") %>%
+  filter(duplicate == FALSE) %>% 
+  pivot_wider(id_cols = c(geoid, county, tract), names_from = variable_l, values_from = estimate)
 
-test <- left_join(ACS_long, census_labels, by = "variable_c")
-  
-test1 <- test %>% pivot_wider(id_cols = c(geoid, county, tract), names_from = c(variable_c, variable_l), values_from = estimate) 
-
+test1 <- test %>%  
+  select(!c(28:55, 72:81, 91:148, 243:280, 448:451, 453:459, 461:469, 477:493)) %>% 
+  mutate(county = str_trim(county)) %>% 
+  left_join(municipal2) %>%
+  left_join(rural) %>% 
+  select(geoid, municipal, county, urban, tract, everything())
 
 
   
@@ -369,3 +396,4 @@ entry, computers and internet use) Financial characteristics (household
 income, monthly housing costs, monthly housing costs as a percentage of
 household income, mortgage status, ratio of value to household income,
 real estate taxes) idea storage
+
